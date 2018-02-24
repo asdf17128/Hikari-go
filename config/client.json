@@ -1,0 +1,8 @@
+{
+  "listenAddress": "localhost",
+  "listenPort": 1180,
+  "serverAddress": "localhost",
+  "serverPort": 9670,
+  "privateKey": "hikari",
+  "secret": "hikari-secret"
+}
