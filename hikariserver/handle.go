@@ -27,7 +27,7 @@ func initHandle() {
 }
 
 func handleConnection(conn *net.Conn) {
-	ctx := context{conn, nil, nil}
+	ctx := &context{conn, nil, nil}
 	var hikariCtx hikaricommon.Context = ctx
 	defer hikaricommon.CloseContext(&hikariCtx)
 
@@ -35,7 +35,7 @@ func handleConnection(conn *net.Conn) {
 	buffer := hikaricommon.NewBuffer()
 
 	// process
-	processHandshake(&ctx, buffer)
+	processHandshake(ctx, buffer)
 
 	// switch
 	hikaricommon.SwitchEncrypted(ctx.targetConn, ctx.clientConn, &hikariCtx, buffer, ctx.crypto)
@@ -97,7 +97,7 @@ func readHikariRequest(ctx *context, buffer *[]byte) {
 		ips, err := net.LookupIP(h)
 		if err != nil {
 			writeHikariFail(ctx.clientConn, buffer, hikaricommon.HikariReplyDnsResolveFail, ctx.crypto)
-			panic(fmt.Sprintf("DNS resolve fail '%v'", h))
+			panic(fmt.Sprintf("DNS resolve fail '%v', %v", h, err))
 		}
 		tgtIp = ips[0]
 

@@ -24,7 +24,7 @@ func initHandle() {
 }
 
 func handleConnection(conn *net.Conn) {
-	ctx := context{conn, nil, nil}
+	ctx := &context{conn, nil, nil}
 	var hikariCtx hikaricommon.Context = ctx
 	defer hikaricommon.CloseContext(&hikariCtx)
 
@@ -32,7 +32,7 @@ func handleConnection(conn *net.Conn) {
 	buffer := hikaricommon.NewBuffer()
 
 	// process
-	processHandshake(&ctx, buffer)
+	processHandshake(ctx, buffer)
 
 	// switch
 	hikaricommon.SwitchEncrypted(ctx.localConn, ctx.serverConn, &hikariCtx, buffer, ctx.crypto)

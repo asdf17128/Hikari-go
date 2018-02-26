@@ -11,7 +11,7 @@ type context struct {
 	crypto     *hikaricommon.Crypto
 }
 
-func (c context) Close() {
+func (c *context) Close() {
 	lc, sc := c.localConn, c.serverConn
 
 	if lc != nil {
