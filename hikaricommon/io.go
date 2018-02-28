@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log"
 	"net"
+	"io"
 )
 
 func NewBuffer() *[]byte {
@@ -12,7 +13,7 @@ func NewBuffer() *[]byte {
 }
 
 func CloseContext(ctx *Context) {
-	if err := recover(); err != nil {
+	if err := recover(); err != nil && err != io.EOF {
 		log.Printf("err, %v\n", err)
 	}
 
