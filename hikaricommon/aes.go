@@ -3,7 +3,6 @@ package hikaricommon
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/md5"
 	"crypto/rand"
 	"io"
 )
@@ -14,17 +13,14 @@ type AESCrypto struct {
 	decStream *cipher.Stream
 }
 
-func NewAESCrypto(key *string, iv *[]byte) *AESCrypto {
+func NewAESCrypto(key *[]byte, iv *[]byte) *AESCrypto {
 	if iv == nil {
 		ivArray := make([]byte, aes.BlockSize)
 		io.ReadFull(rand.Reader, ivArray)
 		iv = &ivArray
-	} else if aes.BlockSize != len(*iv) {
-		panic("bad iv length")
 	}
 
-	sum := md5.Sum([]byte(*key))
-	block, _ := aes.NewCipher(sum[:])
+	block, _ := aes.NewCipher(*key)
 
 	encStream := cipher.NewCFBEncrypter(block, *iv)
 	decStream := cipher.NewCFBDecrypter(block, *iv)

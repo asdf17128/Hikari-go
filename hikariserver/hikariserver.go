@@ -7,6 +7,8 @@ import (
 )
 
 func startHikariServer() {
+	initHandle()
+
 	ads := cfg.ListenAddress
 	port := strconv.Itoa(int(cfg.ListenPort))
 	listenAddress := net.JoinHostPort(ads, port)
@@ -24,7 +26,7 @@ func startHikariServer() {
 		conn, err := listener.Accept()
 		if err != nil {
 			log.Printf("accept err, %v\n", err)
-			continue
+			break
 		}
 
 		go handleConnection(&conn)

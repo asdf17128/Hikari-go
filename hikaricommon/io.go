@@ -1,10 +1,10 @@
 package hikaricommon
 
 import (
-	"bytes"
+	"io"
 	"log"
 	"net"
-	"io"
+	"time"
 )
 
 func NewBuffer() *[]byte {
@@ -20,63 +20,52 @@ func CloseContext(ctx *Context) {
 	(*ctx).Close()
 }
 
+func SetDeadline(conn *net.Conn, time *time.Time) {
+	err := (*conn).SetDeadline(*time)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func ReadAtLeast(conn *net.Conn, buffer *[]byte, min int) int {
+	n, err := io.ReadAtLeast(*conn, *buffer, min)
+	if err != nil {
+		panic(err)
+	}
+
+	return n
+}
+
+func ReadEncryptedAtLeast(conn *net.Conn, buffer *[]byte, min int, crypto *Crypto) int {
+	n := ReadAtLeast(conn, buffer, min)
+	d := (*buffer)[:n]
+	(*crypto).Decrypt(&d)
+
+	return n
+}
+
 func ReadFull(conn *net.Conn, buffer *[]byte) {
-	n, err := (*conn).Read(*buffer)
+	_, err := io.ReadFull(*conn, *buffer)
 	if err != nil {
 		panic(err)
 	}
-
-	if n != len(*buffer) {
-		panic("read err")
-	}
 }
 
-func ReadPlain(conn *net.Conn, buffer *[]byte) *bytes.Buffer {
-	n, err := (*conn).Read(*buffer)
+func ReadEncryptedFull(conn *net.Conn, buffer *[]byte, crypto *Crypto) {
+	ReadFull(conn, buffer)
+	(*crypto).Decrypt(buffer)
+}
+
+func Write(conn *net.Conn, buffer *[]byte) {
+	_, err := (*conn).Write(*buffer)
 	if err != nil {
 		panic(err)
 	}
-
-	data := (*buffer)[:n]
-	return bytes.NewBuffer(data)
 }
 
-func ReadEncrypted(conn *net.Conn, buffer *[]byte, crypto *Crypto) *bytes.Buffer {
-	n, err := (*conn).Read(*buffer)
-	if err != nil {
-		panic(err)
-	}
-
-	data := (*buffer)[:n]
-	(*crypto).Decrypt(&data)
-	return bytes.NewBuffer(data)
-}
-
-func WritePlain(conn *net.Conn, data *[]byte) {
-	n, err := (*conn).Write(*data)
-	if err != nil {
-		panic(err)
-	}
-
-	if n != len(*data) {
-		panic("write err")
-	}
-}
-
-func WritePlainBuffer(conn *net.Conn, buffer *bytes.Buffer) {
-	data := buffer.Bytes()
-	WritePlain(conn, &data)
-}
-
-func WriteEncrypted(conn *net.Conn, data *[]byte, crypto *Crypto) {
-	(*crypto).Encrypt(data)
-	WritePlain(conn, data)
-}
-
-func WriteEncryptedBuffer(conn *net.Conn, buffer *bytes.Buffer, crypto *Crypto) {
-	data := buffer.Bytes()
-	(*crypto).Encrypt(&data)
-	WritePlain(conn, &data)
+func WriteEncrypted(conn *net.Conn, buffer *[]byte, crypto *Crypto) {
+	(*crypto).Encrypt(buffer)
+	Write(conn, buffer)
 }
 
 func SwitchEncrypted(plainConn *net.Conn, encryptedConn *net.Conn, ctx *Context, buffer *[]byte, crypto *Crypto) {

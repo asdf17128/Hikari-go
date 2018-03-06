@@ -1,19 +1,20 @@
 package hikariserver
 
 import (
-	"bytes"
 	"crypto/aes"
 	"crypto/md5"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"hikari-go/hikaricommon"
+	"log"
 	"net"
 	"strconv"
 	"strings"
 )
 
 var authMap map[string]byte
+var secretKey []byte
 
 func initHandle() {
 	// init auth
@@ -24,6 +25,10 @@ func initHandle() {
 		s := hex.EncodeToString(authArray[:])
 		authMap[s] = 0
 	}
+
+	// init secret key
+	secretKeyArray := md5.Sum([]byte(cfg.Secret))
+	secretKey = secretKeyArray[:]
 }
 
 func handleConnection(conn *net.Conn) {
@@ -53,114 +58,138 @@ func processHandshake(ctx *context, buffer *[]byte) {
 }
 
 func readHikariRequest(ctx *context, buffer *[]byte) {
+	buf := *buffer
+
 	iv := make([]byte, aes.BlockSize)
 	hikaricommon.ReadFull(ctx.clientConn, &iv)
 
 	// init crypto
-	var crypto hikaricommon.Crypto = hikaricommon.NewAESCrypto(&cfg.Secret, &iv)
+	var crypto hikaricommon.Crypto = hikaricommon.NewAESCrypto(&secretKey, &iv)
 	ctx.crypto = &crypto
 
-	buf := hikaricommon.ReadEncrypted(ctx.clientConn, buffer, ctx.crypto)
+	n := hikaricommon.ReadEncryptedAtLeast(ctx.clientConn, buffer, 19, ctx.crypto)
 
 	// ver
-	ver, _ := buf.ReadByte()
+	ver := buf[0]
 	if ver != hikaricommon.HikariVer1 {
 		writeHikariFail(ctx.clientConn, buffer, hikaricommon.HikariReplyVersionNotSupport, ctx.crypto)
 		panic(fmt.Sprintf("hikari version '%v' not supported", ver))
 	}
 
 	// auth
-	auth := make([]byte, 16)
-	buf.Read(auth)
+	auth := buf[1:17]
 	if !isValidAuth(&auth) {
 		writeHikariFail(ctx.clientConn, buffer, hikaricommon.HikariReplyAuthFail, ctx.crypto)
 		panic("auth fail")
 	}
 
 	// address type
-	adsType, _ := buf.ReadByte()
-
-	var tgtAds []byte
-	var tgtPort = make([]byte, 2)
-	var tgtIp net.IP
+	adsType := buf[17]
+	var reqLen int
+	var ads, port []byte
 
 	switch adsType {
 	case hikaricommon.HikariAddressTypeDomainName:
-		length, _ := buf.ReadByte()
+		adsLen := int(buf[18])
+		reqLen = 20 + 1 + adsLen
 
-		tgtAds = make([]byte, length)
-		buf.Read(tgtAds)
-		buf.Read(tgtPort)
-
-		// DNS lookup
-		h := string(tgtAds)
-		ips, err := net.LookupIP(h)
-		if err != nil {
-			writeHikariFail(ctx.clientConn, buffer, hikaricommon.HikariReplyDnsResolveFail, ctx.crypto)
-			panic(fmt.Sprintf("DNS resolve fail '%v', %v", h, err))
-		}
-		tgtIp = ips[0]
+		i := 19 + adsLen
+		ads = buf[19:i]
+		port = buf[i:reqLen]
 
 	case hikaricommon.HikariAddressTypeIpv4:
-		tgtAds = make([]byte, net.IPv4len)
-		buf.Read(tgtAds)
-		buf.Read(tgtPort)
+		reqLen = 20 + net.IPv4len
 
-		tgtIp = tgtAds
+		i := 18 + net.IPv4len
+		ads = buf[18:i]
+		port = buf[i:reqLen]
 
 	case hikaricommon.HikariAddressTypeIpv6:
-		tgtAds = make([]byte, net.IPv6len)
-		buf.Read(tgtAds)
-		buf.Read(tgtPort)
+		reqLen = 20 + net.IPv6len
 
-		tgtIp = tgtAds
+		i := 18 + net.IPv6len
+		ads = buf[18:i]
+		port = buf[i:reqLen]
 
 	default:
 		panic(fmt.Sprintf("bad hikari address type '%v'", adsType))
 	}
 
-	if buf.Len() != 0 {
+	if n == reqLen {
+	} else if n < reqLen {
+		b := buf[n:reqLen]
+		hikaricommon.ReadEncryptedFull(ctx.clientConn, &b, ctx.crypto)
+	} else if n > reqLen {
 		panic("bad hikari request")
 	}
 
 	// connect to target
-	tgtAdsStr, tgtPortStr := tgtIp.String(), strconv.Itoa(int(binary.BigEndian.Uint16(tgtPort)))
-	tgt := net.JoinHostPort(tgtAdsStr, tgtPortStr)
-	tgtConn, err := net.Dial("tcp", tgt)
-	if err != nil {
-		writeHikariFail(ctx.clientConn, buffer, hikaricommon.HikariReplyConnectTargetFail, ctx.crypto)
-		panic(fmt.Sprintf("connect to target err, %v", err))
+	var ipList []net.IP
+	if adsType == hikaricommon.HikariAddressTypeDomainName {
+		// DNS lookup
+		host := string(ads)
+		ips, err := net.LookupIP(host)
+		if err != nil {
+			writeHikariFail(ctx.clientConn, buffer, hikaricommon.HikariReplyDnsResolveFail, ctx.crypto)
+			panic(fmt.Sprintf("DNS resolve fail '%v', %v", host, err))
+		}
+		ipList = ips
+	} else {
+		ipList = []net.IP{ads}
 	}
+
+	var tgtConn net.Conn
+	portStr := strconv.Itoa(int(binary.BigEndian.Uint16(port)))
+	for _, ip := range ipList {
+		ipStr := ip.String()
+		tgt := net.JoinHostPort(ipStr, portStr)
+
+		conn, err := net.Dial("tcp", tgt)
+		if err != nil {
+			log.Printf("connect to '%v' fail, %v\n", tgt, err)
+			continue
+		} else {
+			tgtConn = conn
+			break
+		}
+	}
+
+	if tgtConn == nil {
+		writeHikariFail(ctx.clientConn, buffer, hikaricommon.HikariReplyConnectTargetFail, ctx.crypto)
+		panic(fmt.Sprintf("connect to target fail, '%v'", ipList))
+	}
+
+	// set context
 	ctx.targetConn = &tgtConn
 
 	// send hikari response
 	bindAdsType, bindAds, bindPort := getBindInfo(ctx.targetConn)
+	bindAdsLen := len(bindAds)
+	i := 3 + bindAdsLen
 
-	writeBuf := bytes.NewBuffer(*buffer)
-	writeBuf.Reset()
-	writeBuf.WriteByte(hikaricommon.HikariVer1)
-	writeBuf.WriteByte(hikaricommon.HikariReplyOk)
-	writeBuf.WriteByte(bindAdsType)
-	writeBuf.Write(bindAds)
-	writeBuf.Write(bindPort)
+	rspBuf := buf[0 : 5+bindAdsLen]
+	rspBuf[0] = hikaricommon.HikariVer1
+	rspBuf[1] = hikaricommon.HikariReplyOk
+	rspBuf[2] = bindAdsType
+	copy(rspBuf[3:i], bindAds)
+	binary.BigEndian.PutUint16(rspBuf[i:], uint16(bindPort))
 
-	hikaricommon.WriteEncryptedBuffer(ctx.clientConn, writeBuf, ctx.crypto)
+	hikaricommon.WriteEncrypted(ctx.clientConn, &rspBuf, ctx.crypto)
 }
 
-func getBindInfo(conn *net.Conn) (byte, []byte, []byte) {
-	localAds := (*conn).LocalAddr()
-	localAdsArray := strings.Split(localAds.String(), ":")
-	l := len(localAdsArray)
+func getBindInfo(conn *net.Conn) (byte, []byte, int) {
+	localAdsPortStr := (*conn).LocalAddr().String()
+	i := strings.LastIndex(localAdsPortStr, ":")
 
-	localAdsStr := strings.Join(localAdsArray[:l-1], "")
-	localPortInt, _ := strconv.Atoi(localAdsArray[l-1 : l][0])
+	localAdsStr := localAdsPortStr[0:i]
+	localPortStr := localAdsPortStr[i+1:]
+	localPortInt, _ := strconv.Atoi(localPortStr)
 
 	localIp := net.ParseIP(localAdsStr)
 	tmpIp := localIp.To4()
 
 	var bindAdsType byte
 	var bindAds []byte
-	var bindPort = make([]byte, 2)
 
 	if tmpIp != nil {
 		// v4
@@ -172,16 +201,14 @@ func getBindInfo(conn *net.Conn) (byte, []byte, []byte) {
 		bindAds = localIp.To16()
 	}
 
-	binary.BigEndian.PutUint16(bindPort, uint16(localPortInt))
-
-	return bindAdsType, bindAds, bindPort
+	return bindAdsType, bindAds, localPortInt
 }
 
 func writeHikariFail(conn *net.Conn, buffer *[]byte, rsp byte, crypto *hikaricommon.Crypto) {
-	writeBuf := bytes.NewBuffer(*buffer)
-	writeBuf.Reset()
-	writeBuf.WriteByte(hikaricommon.HikariVer1)
-	writeBuf.WriteByte(rsp)
+	rspBuf := (*buffer)[:2]
 
-	hikaricommon.WriteEncryptedBuffer(conn, writeBuf, crypto)
+	rspBuf[0] = hikaricommon.HikariVer1
+	rspBuf[1] = rsp
+
+	hikaricommon.WriteEncrypted(conn, &rspBuf, crypto)
 }
