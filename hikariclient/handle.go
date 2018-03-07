@@ -1,19 +1,28 @@
 package hikariclient
 
 import (
+	"bufio"
+	"bytes"
 	"crypto/md5"
-	"fmt"
+	"encoding/binary"
 	"hikari-go/hikaricommon"
+	"log"
 	"net"
+	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
-var auth []byte
-var srvAddress string
-var secretKey []byte
+var (
+	auth       []byte
+	srvAddress string
+	secretKey  []byte
 
-var socksAuthRsp = &[]byte{hikaricommon.Socks5Ver, hikaricommon.Socks5MethodNoAuth}
+	socksAuthRsp  = []byte{hikaricommon.Socks5Ver, hikaricommon.Socks5MethodNoAuth}
+	httpProxyTail = []byte("\r\n\r\n")
+	httpProxyOK   = []byte("HTTP/1.1 200 Connection Established\r\n\r\n")
+)
 
 func initHandle() {
 	// init auth
@@ -46,12 +55,6 @@ func handleConnection(conn *net.Conn) {
 }
 
 func processHandshake(ctx *context, buffer *[]byte) {
-	readSocksAuth(ctx, buffer)
-	readSocksRequest(ctx, buffer)
-	readHikariResponse(ctx, buffer)
-}
-
-func readSocksAuth(ctx *context, buffer *[]byte) {
 	buf := *buffer
 
 	// set local connection timeout
@@ -59,12 +62,31 @@ func readSocksAuth(ctx *context, buffer *[]byte) {
 	hikaricommon.SetDeadline(ctx.localConn, &timeout)
 
 	// read
-	n := hikaricommon.ReadAtLeast(ctx.localConn, buffer, 2)
+	n := hikaricommon.ReadAtLeast(ctx.localConn, buffer, 1)
+	protocol := buf[0]
+
+	if protocol == 5 {
+		// socks5
+		readSocksAuth(ctx, buffer, n)
+		readSocksRequest(ctx, buffer)
+	} else {
+		// HTTP proxy
+		readHttpRequest(ctx, buffer, n)
+	}
+}
+
+func readSocksAuth(ctx *context, buffer *[]byte, n int) {
+	buf := *buffer
+
+	if n < 2 {
+		b := buf[n:]
+		n += hikaricommon.ReadAtLeast(ctx.localConn, &b, 2-n)
+	}
 
 	// ver
 	ver := buf[0]
 	if ver != hikaricommon.Socks5Ver {
-		panic(fmt.Sprintf("socks version '%v' not supported", ver))
+		panic(hikaricommon.SocksVerNotSupported)
 	}
 
 	// method
@@ -75,11 +97,11 @@ func readSocksAuth(ctx *context, buffer *[]byte) {
 		b := buf[n:reqLen]
 		hikaricommon.ReadFull(ctx.localConn, &b)
 	} else if n > reqLen {
-		panic("bad socks auth request")
+		panic(hikaricommon.BadSocks5AuthReq)
 	}
 
 	// response
-	hikaricommon.Write(ctx.localConn, socksAuthRsp)
+	hikaricommon.Write(ctx.localConn, &socksAuthRsp)
 }
 
 func readSocksRequest(ctx *context, buffer *[]byte) {
@@ -91,14 +113,14 @@ func readSocksRequest(ctx *context, buffer *[]byte) {
 	// ver
 	ver := buf[0]
 	if ver != hikaricommon.Socks5Ver {
-		panic(fmt.Sprintf("socks version '%v' not supported", ver))
+		panic(hikaricommon.SocksVerNotSupported)
 	}
 
 	// command
 	cmd := buf[1]
 	if cmd != hikaricommon.Socks5CommandConnect {
 		writeSocksFail(ctx.localConn, buffer, hikaricommon.Socks5ReplyCommandNotSupported)
-		panic(fmt.Sprintf("socks command '%v' not supported", cmd))
+		panic(hikaricommon.Socks5CmdNotSupported)
 	}
 
 	// ignore rsv
@@ -123,7 +145,7 @@ func readSocksRequest(ctx *context, buffer *[]byte) {
 
 	default:
 		writeSocksFail(ctx.localConn, buffer, hikaricommon.Socks5ReplyAddressTypeNotSupported)
-		panic(fmt.Sprintf("bad socks address type '%v'", adsType))
+		panic(hikaricommon.Socks5AdsTypeNotSupported)
 	}
 
 	if n == reqLen {
@@ -131,19 +153,174 @@ func readSocksRequest(ctx *context, buffer *[]byte) {
 		b := buf[n:reqLen]
 		hikaricommon.ReadFull(ctx.localConn, &b)
 	} else if n > reqLen {
-		panic("bad socks request")
+		panic(hikaricommon.BadSocks5Req)
 	}
 
 	adsAndPortTmp := buf[4:reqLen]
-	adsAndPortLen := len(adsAndPortTmp)
-	adsAndPort := make([]byte, adsAndPortLen)
+	adsAndPort := make([]byte, len(adsAndPortTmp))
 	copy(adsAndPort, adsAndPortTmp)
+
+	// send hikari request
+	err := sendHikariRequest(ctx, buffer, hikariAdsType, &adsAndPort)
+	if err != nil {
+		writeSocksFail(ctx.localConn, buffer, hikaricommon.Socks5ReplyGeneralServerFailure)
+		panic(hikaricommon.ConnectToServerFail)
+	}
+
+	// read hikari response
+	reply, bindAdsType, bindAdsAndPort, extraData := readHikariResponse(ctx, buffer)
+
+	switch reply {
+	case hikaricommon.HikariReplyOk:
+		var socksAdsType byte
+		switch bindAdsType {
+		case hikaricommon.HikariAddressTypeIpv4:
+			socksAdsType = hikaricommon.Socks5AddressTypeIpv4
+
+		case hikaricommon.HikariAddressTypeIpv6:
+			socksAdsType = hikaricommon.Socks5AddressTypeIpv6
+
+		case hikaricommon.HikariAddressTypeDomainName:
+			socksAdsType = hikaricommon.Socks5AddressTypeDomainName
+
+		default:
+			panic(hikaricommon.HikariAdsTypeNotSupported)
+		}
+
+		// response
+		rspBuf := buf[0 : 4+len(*bindAdsAndPort)]
+		rspBuf[0] = hikaricommon.Socks5Ver
+		rspBuf[1] = hikaricommon.Socks5ReplyOk
+		rspBuf[2] = hikaricommon.Socks5Rsv
+		rspBuf[3] = socksAdsType
+		copy(rspBuf[4:], *bindAdsAndPort)
+
+		hikaricommon.Write(ctx.localConn, &rspBuf)
+
+		if extraData != nil {
+			hikaricommon.Write(ctx.localConn, extraData)
+		}
+
+	case hikaricommon.HikariReplyVersionNotSupport:
+		writeSocksFail(ctx.localConn, buffer, hikaricommon.Socks5ReplyGeneralServerFailure)
+		panic(hikaricommon.HikariVerNotSupported)
+
+	case hikaricommon.HikariReplyAuthFail:
+		writeSocksFail(ctx.localConn, buffer, hikaricommon.Socks5ReplyGeneralServerFailure)
+		panic(hikaricommon.AuthFail)
+
+	case hikaricommon.HikariReplyDnsLookupFail:
+		writeSocksFail(ctx.localConn, buffer, hikaricommon.Socks5ReplyHostUnreachable)
+		panic(hikaricommon.DnsLookupFail)
+
+	case hikaricommon.HikariReplyConnectTargetFail:
+		writeSocksFail(ctx.localConn, buffer, hikaricommon.Socks5ReplyHostUnreachable)
+		panic(hikaricommon.ConnectToTargetFail)
+
+	default:
+		writeSocksFail(ctx.localConn, buffer, hikaricommon.Socks5ReplyGeneralServerFailure)
+		panic(hikaricommon.BadHikariReply)
+	}
+}
+
+func readHttpRequest(ctx *context, buffer *[]byte, n int) {
+	buf := *buffer
+
+	// read until read first HTTP request head
+	for {
+		if n > 4 && bytes.Equal(buf[n-4:n], httpProxyTail) {
+			break
+		}
+
+		b := buf[n:]
+		n += hikaricommon.Read(ctx.localConn, &b)
+	}
+	head := buf[:n]
+
+	// parse HTTP request
+	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(head)))
+	if err != nil {
+		panic(err)
+	}
+
+	// get address and port
+	host := req.Host
+	var tgtAds []byte
+	var tgtPort int
+	if i := strings.LastIndex(host, ":"); i != -1 {
+		tgtAds = []byte(host[:i])
+		tgtPort, _ = strconv.Atoi(host[i+1:])
+
+	} else {
+		tgtAds = []byte(host)
+		tgtPort = 80 // default port 80
+	}
+
+	var adsAndPort []byte
+	l := len(tgtAds)
+
+	adsAndPort = make([]byte, l+3)
+	adsAndPort[0] = byte(l)
+	copy(adsAndPort[1:], tgtAds)
+	binary.BigEndian.PutUint16(adsAndPort[l+1:], uint16(tgtPort))
+
+	// process CONNECT or other HTTP request
+	isConnectReq := req.Method == "CONNECT"
+	var reqData []byte
+	if !isConnectReq {
+		reqData = make([]byte, len(head))
+		copy(reqData, head)
+	}
+
+	// send hikari request
+	err = sendHikariRequest(ctx, buffer, hikaricommon.HikariAddressTypeDomainName, &adsAndPort)
+	if err != nil {
+		panic(hikaricommon.ConnectToServerFail)
+	}
+
+	// read hikari response
+	reply, _, _, extraData := readHikariResponse(ctx, buffer)
+
+	switch reply {
+	case hikaricommon.HikariReplyOk:
+		if isConnectReq {
+			// response
+			hikaricommon.Write(ctx.localConn, &httpProxyOK)
+
+		} else {
+			// send request
+			hikaricommon.WriteEncrypted(ctx.serverConn, &reqData, ctx.crypto)
+		}
+
+		if extraData != nil {
+			hikaricommon.Write(ctx.localConn, extraData)
+		}
+
+	case hikaricommon.HikariReplyVersionNotSupport:
+		panic(hikaricommon.HikariVerNotSupported)
+
+	case hikaricommon.HikariReplyAuthFail:
+		panic(hikaricommon.AuthFail)
+
+	case hikaricommon.HikariReplyDnsLookupFail:
+		panic(hikaricommon.DnsLookupFail)
+
+	case hikaricommon.HikariReplyConnectTargetFail:
+		panic(hikaricommon.ConnectToTargetFail)
+
+	default:
+		panic(hikaricommon.BadHikariReply)
+	}
+}
+
+func sendHikariRequest(ctx *context, buffer *[]byte, hikariAdsType byte, adsAndPort *[]byte) (connErr error) {
+	buf := *buffer
 
 	// connect to server
 	srvConn, err := net.DialTimeout("tcp", srvAddress, time.Second*hikaricommon.DialTimeoutSeconds)
 	if err != nil {
-		writeSocksFail(ctx.localConn, buffer, hikaricommon.Socks5ReplyGeneralServerFailure)
-		panic(fmt.Sprintf("connect to server err, %v", err))
+		log.Printf("connect to server fail: %v\n", err.Error())
+		return err
 	}
 	ctx.serverConn = &srvConn
 
@@ -159,16 +336,18 @@ func readSocksRequest(ctx *context, buffer *[]byte) {
 	hikaricommon.Write(ctx.serverConn, crypto.GetIV())
 
 	// send hikari request
-	rspBuf := buf[:18+adsAndPortLen]
+	rspBuf := buf[:18+len(*adsAndPort)]
 	rspBuf[0] = hikaricommon.HikariVer1
 	copy(rspBuf[1:17], auth)
 	rspBuf[17] = hikariAdsType
-	copy(rspBuf[18:], adsAndPort)
+	copy(rspBuf[18:], *adsAndPort)
 
 	hikaricommon.WriteEncrypted(ctx.serverConn, &rspBuf, ctx.crypto)
+
+	return nil
 }
 
-func readHikariResponse(ctx *context, buffer *[]byte) {
+func readHikariResponse(ctx *context, buffer *[]byte) (reply byte, bindAdsType byte, bindAdsAndPort *[]byte, extraData *[]byte) {
 	buf := *buffer
 
 	// read
@@ -177,11 +356,11 @@ func readHikariResponse(ctx *context, buffer *[]byte) {
 	// ver
 	ver := buf[0]
 	if ver != hikaricommon.HikariVer1 {
-		panic(fmt.Sprintf("hikari version '%v' not supported", ver))
+		panic(hikaricommon.HikariVerNotSupported)
 	}
 
 	// reply
-	reply := buf[1]
+	reply = buf[1]
 
 	switch reply {
 	case hikaricommon.HikariReplyOk:
@@ -193,27 +372,22 @@ func readHikariResponse(ctx *context, buffer *[]byte) {
 		// bind address type
 		bindAdsType := buf[2]
 		var reqLen int
-		var socksAdsType byte
 
 		switch bindAdsType {
 		case hikaricommon.HikariAddressTypeIpv4:
 			reqLen = 5 + net.IPv4len
-			socksAdsType = hikaricommon.Socks5AddressTypeIpv4
 
 		case hikaricommon.HikariAddressTypeIpv6:
 			reqLen = 5 + net.IPv6len
-			socksAdsType = hikaricommon.Socks5AddressTypeIpv6
 
 		case hikaricommon.HikariAddressTypeDomainName:
 			reqLen = 5 + 1 + int(buf[3])
-			socksAdsType = hikaricommon.Socks5AddressTypeDomainName
 
 		default:
-			writeSocksFail(ctx.localConn, buffer, hikaricommon.Socks5ReplyGeneralServerFailure)
-			panic(fmt.Sprintf("hikari address type '%v' not supported", bindAdsType))
+			panic(hikaricommon.HikariAdsTypeNotSupported)
 		}
 
-		var extraData []byte = nil
+		var extraData []byte
 
 		if n == reqLen {
 		} else if n < reqLen {
@@ -226,43 +400,25 @@ func readHikariResponse(ctx *context, buffer *[]byte) {
 		}
 
 		bindAdsAndPortTmp := buf[3:reqLen]
-		bindAdsAndPortLen := len(bindAdsAndPortTmp)
-		bindAdsAndPort := make([]byte, bindAdsAndPortLen)
+		bindAdsAndPort := make([]byte, len(bindAdsAndPortTmp))
 		copy(bindAdsAndPort, bindAdsAndPortTmp)
 
-		// response
-		rspBuf := buf[0 : 4+bindAdsAndPortLen]
-		rspBuf[0] = hikaricommon.Socks5Ver
-		rspBuf[1] = hikaricommon.Socks5ReplyOk
-		rspBuf[2] = hikaricommon.Socks5Rsv
-		rspBuf[3] = socksAdsType
-		copy(rspBuf[4:], bindAdsAndPort)
-
-		hikaricommon.Write(ctx.localConn, &rspBuf)
-
-		if extraData != nil {
-			hikaricommon.Write(ctx.localConn, &extraData)
-		}
+		return reply, bindAdsType, &bindAdsAndPort, &extraData
 
 	case hikaricommon.HikariReplyVersionNotSupport:
-		writeSocksFail(ctx.localConn, buffer, hikaricommon.Socks5ReplyGeneralServerFailure)
-		panic("server: hikari version not supported")
+		fallthrough
 
 	case hikaricommon.HikariReplyAuthFail:
-		writeSocksFail(ctx.localConn, buffer, hikaricommon.Socks5ReplyGeneralServerFailure)
-		panic("server: auth fail")
+		fallthrough
 
-	case hikaricommon.HikariReplyDnsResolveFail:
-		writeSocksFail(ctx.localConn, buffer, hikaricommon.Socks5ReplyHostUnreachable)
-		panic("server: DNS resolve fail")
+	case hikaricommon.HikariReplyDnsLookupFail:
+		fallthrough
 
 	case hikaricommon.HikariReplyConnectTargetFail:
-		writeSocksFail(ctx.localConn, buffer, hikaricommon.Socks5ReplyHostUnreachable)
-		panic("server: connect to target fail")
+		return reply, 0, nil, nil
 
 	default:
-		writeSocksFail(ctx.localConn, buffer, hikaricommon.Socks5ReplyGeneralServerFailure)
-		panic(fmt.Sprintf("bad hikari reply '%v'", reply))
+		panic(hikaricommon.BadHikariReply)
 	}
 }
 

@@ -13,6 +13,6 @@ const (
 	HikariReplyOk                byte = 0
 	HikariReplyVersionNotSupport byte = 1
 	HikariReplyAuthFail          byte = 2
-	HikariReplyDnsResolveFail    byte = 3
+	HikariReplyDnsLookupFail     byte = 3
 	HikariReplyConnectTargetFail byte = 4
 )

@@ -5,16 +5,18 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"encoding/hex"
-	"fmt"
 	"hikari-go/hikaricommon"
+	"log"
 	"net"
 	"strconv"
 	"strings"
 	"time"
 )
 
-var authMap map[string]byte
-var secretKey []byte
+var (
+	authMap   map[string]byte
+	secretKey []byte
+)
 
 func initHandle() {
 	// init auth
@@ -77,14 +79,14 @@ func readHikariRequest(ctx *context, buffer *[]byte) {
 	ver := buf[0]
 	if ver != hikaricommon.HikariVer1 {
 		writeHikariFail(ctx.clientConn, buffer, hikaricommon.HikariReplyVersionNotSupport, ctx.crypto)
-		panic(fmt.Sprintf("hikari version '%v' not supported", ver))
+		panic(hikaricommon.HikariVerNotSupported)
 	}
 
 	// auth
 	auth := buf[1:17]
 	if !isValidAuth(&auth) {
 		writeHikariFail(ctx.clientConn, buffer, hikaricommon.HikariReplyAuthFail, ctx.crypto)
-		panic("auth fail")
+		panic(hikaricommon.AuthFail)
 	}
 
 	// address type
@@ -116,7 +118,7 @@ func readHikariRequest(ctx *context, buffer *[]byte) {
 		port = buf[i:reqLen]
 
 	default:
-		panic(fmt.Sprintf("bad hikari address type '%v'", adsType))
+		panic(hikaricommon.HikariAdsTypeNotSupported)
 	}
 
 	if n == reqLen {
@@ -124,7 +126,7 @@ func readHikariRequest(ctx *context, buffer *[]byte) {
 		b := buf[n:reqLen]
 		hikaricommon.ReadEncryptedFull(ctx.clientConn, &b, ctx.crypto)
 	} else if n > reqLen {
-		panic("bad hikari request")
+		panic(hikaricommon.BadHikariReq)
 	}
 
 	// connect to target
@@ -134,8 +136,9 @@ func readHikariRequest(ctx *context, buffer *[]byte) {
 		host := string(ads)
 		ips, err := net.LookupIP(host)
 		if err != nil {
-			writeHikariFail(ctx.clientConn, buffer, hikaricommon.HikariReplyDnsResolveFail, ctx.crypto)
-			panic(fmt.Sprintf("DNS resolve fail '%v', %v", host, err))
+			writeHikariFail(ctx.clientConn, buffer, hikaricommon.HikariReplyDnsLookupFail, ctx.crypto)
+			log.Printf("DNS lookup fail: %v\n", err.Error())
+			panic(hikaricommon.DnsLookupFail)
 		}
 		ipList = ips
 	} else {
@@ -159,7 +162,7 @@ func readHikariRequest(ctx *context, buffer *[]byte) {
 
 	if tgtConn == nil {
 		writeHikariFail(ctx.clientConn, buffer, hikaricommon.HikariReplyConnectTargetFail, ctx.crypto)
-		panic(fmt.Sprintf("connect to target fail, '%v'", ipList))
+		panic(hikaricommon.ConnectToTargetFail)
 	}
 
 	// set context

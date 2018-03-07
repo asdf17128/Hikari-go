@@ -20,25 +20,20 @@ func CloseContext(ctx *Context) {
 	(*ctx).Close()
 }
 
-func SetReadDeadline(conn *net.Conn, time *time.Time) {
-	err := (*conn).SetReadDeadline(*time)
-	if err != nil {
-		panic(err)
-	}
-}
-
-func SetWriteDeadline(conn *net.Conn, time *time.Time) {
-	err := (*conn).SetWriteDeadline(*time)
-	if err != nil {
-		panic(err)
-	}
-}
-
 func SetDeadline(conn *net.Conn, time *time.Time) {
 	err := (*conn).SetDeadline(*time)
 	if err != nil {
 		panic(err)
 	}
+}
+
+func Read(conn *net.Conn, buffer *[]byte) int {
+	n, err := (*conn).Read(*buffer)
+	if err != nil {
+		panic(err)
+	}
+
+	return n
 }
 
 func ReadAtLeast(conn *net.Conn, buffer *[]byte, min int) int {
