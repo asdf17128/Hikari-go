@@ -20,6 +20,20 @@ func CloseContext(ctx *Context) {
 	(*ctx).Close()
 }
 
+func SetReadDeadline(conn *net.Conn, time *time.Time) {
+	err := (*conn).SetReadDeadline(*time)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func SetWriteDeadline(conn *net.Conn, time *time.Time) {
+	err := (*conn).SetWriteDeadline(*time)
+	if err != nil {
+		panic(err)
+	}
+}
+
 func SetDeadline(conn *net.Conn, time *time.Time) {
 	err := (*conn).SetDeadline(*time)
 	if err != nil {
@@ -81,11 +95,17 @@ func pipePlain(src *net.Conn, dst *net.Conn, ctx *Context, buffer *[]byte, crypt
 	buf := *buffer
 	c := *crypto
 
+	var data []byte
+	var t time.Time
 	for {
+		// set src timeout
+		t = time.Now().Add(time.Minute * SwitchTimeoutMinutes)
+		SetDeadline(src, &t)
+
 		n, err := s.Read(buf)
 		if err != nil {
 			if n != 0 {
-				data := buf[:n]
+				data = buf[:n]
 				c.Encrypt(&data)
 
 				_, err = d.Write(data)
@@ -97,7 +117,7 @@ func pipePlain(src *net.Conn, dst *net.Conn, ctx *Context, buffer *[]byte, crypt
 			break
 		}
 
-		data := buf[:n]
+		data = buf[:n]
 		c.Encrypt(&data)
 
 		_, err = d.Write(data)
@@ -115,11 +135,17 @@ func pipeEncrypted(src *net.Conn, dst *net.Conn, ctx *Context, buffer *[]byte, c
 	buf := *buffer
 	c := *crypto
 
+	var data []byte
+	var t time.Time
 	for {
+		// set src timeout
+		t = time.Now().Add(time.Minute * SwitchTimeoutMinutes)
+		SetDeadline(src, &t)
+
 		n, err := s.Read(buf)
 		if err != nil {
 			if n != 0 {
-				data := buf[:n]
+				data = buf[:n]
 				c.Decrypt(&data)
 
 				_, err = d.Write(data)
@@ -131,7 +157,7 @@ func pipeEncrypted(src *net.Conn, dst *net.Conn, ctx *Context, buffer *[]byte, c
 			break
 		}
 
-		data := buf[:n]
+		data = buf[:n]
 		c.Decrypt(&data)
 
 		_, err = d.Write(data)

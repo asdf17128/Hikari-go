@@ -7,10 +7,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hikari-go/hikaricommon"
-	"log"
 	"net"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var authMap map[string]byte
@@ -59,6 +59,10 @@ func processHandshake(ctx *context, buffer *[]byte) {
 
 func readHikariRequest(ctx *context, buffer *[]byte) {
 	buf := *buffer
+
+	// set client connection timeout
+	timeout := time.Now().Add(time.Second * hikaricommon.HandshakeTimeoutSeconds)
+	hikaricommon.SetDeadline(ctx.clientConn, &timeout)
 
 	iv := make([]byte, aes.BlockSize)
 	hikaricommon.ReadFull(ctx.clientConn, &iv)
@@ -144,9 +148,8 @@ func readHikariRequest(ctx *context, buffer *[]byte) {
 		ipStr := ip.String()
 		tgt := net.JoinHostPort(ipStr, portStr)
 
-		conn, err := net.Dial("tcp", tgt)
+		conn, err := net.DialTimeout("tcp", tgt, time.Second*hikaricommon.DialTimeoutSeconds)
 		if err != nil {
-			log.Printf("connect to '%v' fail, %v\n", tgt, err)
 			continue
 		} else {
 			tgtConn = conn

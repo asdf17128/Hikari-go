@@ -6,6 +6,7 @@ import (
 	"hikari-go/hikaricommon"
 	"net"
 	"strconv"
+	"time"
 )
 
 var auth []byte
@@ -52,6 +53,10 @@ func processHandshake(ctx *context, buffer *[]byte) {
 
 func readSocksAuth(ctx *context, buffer *[]byte) {
 	buf := *buffer
+
+	// set local connection timeout
+	timeout := time.Now().Add(time.Second * hikaricommon.HandshakeTimeoutSeconds)
+	hikaricommon.SetDeadline(ctx.localConn, &timeout)
 
 	// read
 	n := hikaricommon.ReadAtLeast(ctx.localConn, buffer, 2)
@@ -135,12 +140,16 @@ func readSocksRequest(ctx *context, buffer *[]byte) {
 	copy(adsAndPort, adsAndPortTmp)
 
 	// connect to server
-	srvConn, err := net.Dial("tcp", srvAddress)
+	srvConn, err := net.DialTimeout("tcp", srvAddress, time.Second*hikaricommon.DialTimeoutSeconds)
 	if err != nil {
 		writeSocksFail(ctx.localConn, buffer, hikaricommon.Socks5ReplyGeneralServerFailure)
 		panic(fmt.Sprintf("connect to server err, %v", err))
 	}
 	ctx.serverConn = &srvConn
+
+	// set server connection timeout
+	timeout := time.Now().Add(time.Second * hikaricommon.HandshakeTimeoutSeconds)
+	hikaricommon.SetDeadline(ctx.serverConn, &timeout)
 
 	// init crypto
 	var crypto hikaricommon.Crypto = hikaricommon.NewAESCrypto(&secretKey, nil)

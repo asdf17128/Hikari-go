@@ -26,7 +26,7 @@ func startHikariServer() {
 		conn, err := listener.Accept()
 		if err != nil {
 			log.Printf("accept err, %v\n", err)
-			break
+			continue
 		}
 
 		go handleConnection(&conn)
