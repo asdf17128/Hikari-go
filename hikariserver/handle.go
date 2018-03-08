@@ -137,7 +137,7 @@ func readHikariRequest(ctx *context, buffer *[]byte) {
 		ips, err := net.LookupIP(host)
 		if err != nil {
 			writeHikariFail(ctx.clientConn, buffer, hikaricommon.HikariReplyDnsLookupFail, ctx.crypto)
-			log.Printf("DNS lookup fail: %v\n", err.Error())
+			log.Println("dns lookup fail:", err)
 			panic(hikaricommon.DnsLookupFail)
 		}
 		ipList = ips
@@ -153,6 +153,7 @@ func readHikariRequest(ctx *context, buffer *[]byte) {
 
 		conn, err := net.DialTimeout("tcp", tgt, time.Second*hikaricommon.DialTimeoutSeconds)
 		if err != nil {
+			log.Println("connect to target fail:", tgt)
 			continue
 		} else {
 			tgtConn = conn

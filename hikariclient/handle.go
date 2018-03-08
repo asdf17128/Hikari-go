@@ -6,7 +6,6 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"hikari-go/hikaricommon"
-	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -319,7 +318,6 @@ func sendHikariRequest(ctx *context, buffer *[]byte, hikariAdsType byte, adsAndP
 	// connect to server
 	srvConn, err := net.DialTimeout("tcp", srvAddress, time.Second*hikaricommon.DialTimeoutSeconds)
 	if err != nil {
-		log.Printf("connect to server fail: %v\n", err.Error())
 		return err
 	}
 	ctx.serverConn = &srvConn

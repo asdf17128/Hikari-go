@@ -14,7 +14,7 @@ func NewBuffer() *[]byte {
 
 func CloseContext(ctx *Context) {
 	if err := recover(); err != nil && err != io.EOF {
-		log.Printf("err, %v\n", err)
+		log.Println("err:", err)
 	}
 
 	(*ctx).Close()
