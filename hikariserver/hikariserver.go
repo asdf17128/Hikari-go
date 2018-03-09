@@ -7,8 +7,10 @@ import (
 )
 
 func startHikariServer() {
-	initHandle()
+	// init status
+	initStatus()
 
+	// init listener
 	ads := cfg.ListenAddress
 	port := strconv.Itoa(int(cfg.ListenPort))
 	listenAddress := net.JoinHostPort(ads, port)
@@ -19,7 +21,7 @@ func startHikariServer() {
 	}
 	defer listener.Close()
 
-	// start
+	// accept
 	log.Printf("hikari server start on '%v'\n", listenAddress)
 
 	for {

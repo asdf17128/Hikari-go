@@ -3,7 +3,6 @@ package hikariclient
 import (
 	"bufio"
 	"bytes"
-	"crypto/md5"
 	"encoding/binary"
 	"hikari-go/hikaricommon"
 	"net"
@@ -12,31 +11,6 @@ import (
 	"strings"
 	"time"
 )
-
-var (
-	auth       []byte
-	srvAddress string
-	secretKey  []byte
-
-	socksAuthRsp  = []byte{hikaricommon.Socks5Ver, hikaricommon.Socks5MethodNoAuth}
-	httpProxyTail = []byte("\r\n\r\n")
-	httpProxyOK   = []byte("HTTP/1.1 200 Connection Established\r\n\r\n")
-)
-
-func initHandle() {
-	// init auth
-	authArray := md5.Sum([]byte(cfg.PrivateKey))
-	auth = authArray[:]
-
-	// init server address
-	srvAds := cfg.ServerAddress
-	srvPort := strconv.Itoa(int(cfg.ServerPort))
-	srvAddress = net.JoinHostPort(srvAds, srvPort)
-
-	// init secret key
-	secretKeyArray := md5.Sum([]byte(cfg.Secret))
-	secretKey = secretKeyArray[:]
-}
 
 func handleConnection(conn *net.Conn) {
 	ctx := &context{conn, nil, nil}
@@ -54,16 +28,16 @@ func handleConnection(conn *net.Conn) {
 }
 
 func processHandshake(ctx *context, buffer *[]byte) {
-	buf := *buffer
-
 	// set local connection timeout
 	timeout := time.Now().Add(time.Second * hikaricommon.HandshakeTimeoutSeconds)
 	hikaricommon.SetDeadline(ctx.localConn, &timeout)
 
+	buf := *buffer
+
 	// read
 	n := hikaricommon.ReadAtLeast(ctx.localConn, buffer, 1)
-	protocol := buf[0]
 
+	protocol := buf[0]
 	if protocol == 5 {
 		// socks5
 		readSocksAuth(ctx, buffer, n)
@@ -206,7 +180,7 @@ func readSocksRequest(ctx *context, buffer *[]byte) {
 
 	case hikaricommon.HikariReplyAuthFail:
 		writeSocksFail(ctx.localConn, buffer, hikaricommon.Socks5ReplyGeneralServerFailure)
-		panic(hikaricommon.AuthFail)
+		panic(hikaricommon.HikariAuthFail)
 
 	case hikaricommon.HikariReplyDnsLookupFail:
 		writeSocksFail(ctx.localConn, buffer, hikaricommon.Socks5ReplyHostUnreachable)
@@ -225,10 +199,15 @@ func readSocksRequest(ctx *context, buffer *[]byte) {
 func readHttpRequest(ctx *context, buffer *[]byte, n int) {
 	buf := *buffer
 
-	// read until read first HTTP request head
+	// read until first HTTP request head is read
+	bufLen := len(buf)
 	for {
-		if n > 4 && bytes.Equal(buf[n-4:n], httpProxyTail) {
+		if n > 4 && bytes.Equal(buf[n-4:n], httpHeadTail) {
 			break
+		}
+
+		if n == bufLen {
+			panic(hikaricommon.BadHttpProxyReq)
 		}
 
 		b := buf[n:]
@@ -299,7 +278,7 @@ func readHttpRequest(ctx *context, buffer *[]byte, n int) {
 		panic(hikaricommon.HikariVerNotSupported)
 
 	case hikaricommon.HikariReplyAuthFail:
-		panic(hikaricommon.AuthFail)
+		panic(hikaricommon.HikariAuthFail)
 
 	case hikaricommon.HikariReplyDnsLookupFail:
 		panic(hikaricommon.DnsLookupFail)

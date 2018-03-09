@@ -7,8 +7,10 @@ import (
 )
 
 func startSocksServer() {
-	initHandle()
+	// init status
+	initStatus()
 
+	// init listener
 	ads := cfg.ListenAddress
 	port := strconv.Itoa(int(cfg.ListenPort))
 	listenAddress := net.JoinHostPort(ads, port)
@@ -19,7 +21,7 @@ func startSocksServer() {
 	}
 	defer listener.Close()
 
-	// start
+	// accept
 	log.Printf("socks server start on '%v'\n", listenAddress)
 
 	for {

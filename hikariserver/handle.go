@@ -2,7 +2,6 @@ package hikariserver
 
 import (
 	"crypto/aes"
-	"crypto/md5"
 	"encoding/binary"
 	"encoding/hex"
 	"hikari-go/hikaricommon"
@@ -12,26 +11,6 @@ import (
 	"strings"
 	"time"
 )
-
-var (
-	authMap   map[string]byte
-	secretKey []byte
-)
-
-func initHandle() {
-	// init auth
-	authMap = make(map[string]byte, len(cfg.PrivateKeyList))
-
-	for _, k := range cfg.PrivateKeyList {
-		authArray := md5.Sum([]byte(k))
-		s := hex.EncodeToString(authArray[:])
-		authMap[s] = 0
-	}
-
-	// init secret key
-	secretKeyArray := md5.Sum([]byte(cfg.Secret))
-	secretKey = secretKeyArray[:]
-}
 
 func handleConnection(conn *net.Conn) {
 	ctx := &context{conn, nil, nil}
@@ -48,24 +27,18 @@ func handleConnection(conn *net.Conn) {
 	hikaricommon.SwitchEncrypted(ctx.targetConn, ctx.clientConn, &hikariCtx, buffer, ctx.crypto)
 }
 
-func isValidAuth(auth *[]byte) bool {
-	s := hex.EncodeToString(*auth)
-	_, exits := authMap[s]
-
-	return exits
-}
-
 func processHandshake(ctx *context, buffer *[]byte) {
+	// set client connection timeout
+	timeout := time.Now().Add(time.Second * hikaricommon.HandshakeTimeoutSeconds)
+	hikaricommon.SetDeadline(ctx.clientConn, &timeout)
+
 	readHikariRequest(ctx, buffer)
 }
 
 func readHikariRequest(ctx *context, buffer *[]byte) {
 	buf := *buffer
 
-	// set client connection timeout
-	timeout := time.Now().Add(time.Second * hikaricommon.HandshakeTimeoutSeconds)
-	hikaricommon.SetDeadline(ctx.clientConn, &timeout)
-
+	// read IV
 	iv := make([]byte, aes.BlockSize)
 	hikaricommon.ReadFull(ctx.clientConn, &iv)
 
@@ -73,6 +46,7 @@ func readHikariRequest(ctx *context, buffer *[]byte) {
 	var crypto hikaricommon.Crypto = hikaricommon.NewAESCrypto(&secretKey, &iv)
 	ctx.crypto = &crypto
 
+	// read request
 	n := hikaricommon.ReadEncryptedAtLeast(ctx.clientConn, buffer, 19, ctx.crypto)
 
 	// ver
@@ -83,10 +57,10 @@ func readHikariRequest(ctx *context, buffer *[]byte) {
 	}
 
 	// auth
-	auth := buf[1:17]
-	if !isValidAuth(&auth) {
+	authHex := hex.EncodeToString(buf[1:17])
+	if !isValidAuth(authHex) {
 		writeHikariFail(ctx.clientConn, buffer, hikaricommon.HikariReplyAuthFail, ctx.crypto)
-		panic(hikaricommon.AuthFail)
+		panic(hikaricommon.HikariAuthFail)
 	}
 
 	// address type
